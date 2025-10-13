@@ -3,11 +3,10 @@
 // Works for: slash command -> REQUEST_DIALOG, message events, and dialog submits.
 
 const express = require('express');
-const morgan = require('morgan');
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
-app.use(morgan('dev'));
+
 
 // --------------------------- Helper responses -----------------------------
 function textResponse(text) {
