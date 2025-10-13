@@ -1,0 +1,19 @@
+{
+  "commonEventObject":{"userLocale":"en","hostApp":"CHAT","platform":"WEB"},
+  "chat":{
+    "user":{"name":"users/114143767090402137146","displayName":"Enemme Studios","email":"info@enemmestudios.com"},
+    "eventTime":"2025-10-13T12:50:00.000Z",
+    "messagePayload":{
+      "space":{"name":"spaces/uQt54iAAAAE"},
+      "message":{"text":"", "thread":{}}
+    }
+  },
+  "action":{
+    "actionMethodName":"handleSubmit",
+    "parameters":[
+      {"key":"prospectName","value":"Jane Doe"},
+      {"key":"email","value":"jane@example.com"},
+      {"key":"response","value":"Interested - follow up please"}
+    ]
+  }
+}

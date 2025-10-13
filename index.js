@@ -1,183 +1,251 @@
 // index.js
+// Simple Express app to handle Google Chat events and return dialog JSON.
+// Works for: slash command -> REQUEST_DIALOG, message events, and dialog submits.
+
 const express = require('express');
+const morgan = require('morgan');
+
 const app = express();
+app.use(express.json({ limit: '1mb' }));
+app.use(morgan('dev'));
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// Root and health endpoints so the service is discoverable in a browser
-app.get('/', (req, res) => {
-  res.send('Campaign Logger Bot is running.');
-});
-app.get('/healthz', (req, res) => res.send('OK'));
-
-// Helper — plain text response
+// --------------------------- Helper responses -----------------------------
 function textResponse(text) {
   return { text };
 }
 
-// Helper — well-formed dialog + cardsV2 fallback
+// Builds the dialog JSON Google Chat expects (actionResponse: DIALOG).
+// You can customize the dialog body/widgets here.
 function buildDialogResponse() {
+  // actionResponse + cardsV2 is a good fallback for modern clients.
   const dialog = {
     actionResponse: {
-      type: "DIALOG",
+      type: 'DIALOG',
       dialogAction: {
         dialog: {
-          title: "Log Positive Response",
+          title: 'Log Positive Response',
           body: {
             sections: [
               {
-                header: "Log Positive Response",
                 widgets: [
+                  { textInput: { label: 'Prospect Name', name: 'prospectName' } },
+                  { textInput: { label: 'Email', name: 'email' } },
                   {
                     textInput: {
-                      label: "Prospect Name",
-                      name: "prospectName",
-                      type: "SINGLE_LINE"
-                    }
-                  },
-                  {
-                    textInput: {
-                      label: "Email",
-                      name: "email",
-                      type: "SINGLE_LINE"
-                    }
-                  },
-                  {
-                    textInput: {
-                      label: "Response (copy/paste)",
-                      name: "response",
-                      type: "MULTIPLE_LINE"
+                      label: 'Response (copy/paste)',
+                      name: 'response',
+                      multiline: true
                     }
                   }
                 ]
               }
-            ]
-          },
-          fixedFooter: {
-            primaryButton: {
-              text: "Submit",
-              onClick: { action: { actionMethodName: "handleSubmit" } }
-            },
-            secondaryButton: {
-              text: "Cancel",
-              onClick: { action: { actionMethodName: "handleCancel" } }
+            ],
+            fixedFooter: {
+              primaryButton: {
+                text: 'Submit',
+                onClick: {
+                  action: { actionMethodName: 'handleSubmit' }
+                }
+              },
+              secondaryButton: {
+                text: 'Cancel',
+                onClick: {
+                  action: { actionMethodName: 'handleCancel' }
+                }
+              }
             }
           }
         }
       }
     },
-    // Add a cardsV2 fallback and a small text to improve compatibility with various clients
+    // cardsV2 fallback view that Chat can render if DIALOG parsing differs
     cardsV2: [
       {
-        cardId: "dlg-fallback",
+        cardId: 'dlg-fallback',
         card: {
-          header: { title: "Log Positive Response" },
+          header: { title: 'Log Positive Response' },
           sections: [
             {
               widgets: [
-                { textInput: { label: "Prospect Name", name: "prospectName", type: "SINGLE_LINE" } },
-                { textInput: { label: "Email", name: "email", type: "SINGLE_LINE" } },
-                { textInput: { label: "Response (copy/paste)", name: "response", type: "MULTIPLE_LINE" } }
+                { textInput: { label: 'Prospect Name', name: 'prospectName' } },
+                { textInput: { label: 'Email', name: 'email' } },
+                {
+                  textInput: {
+                    label: 'Response (copy/paste)',
+                    name: 'response',
+                    multiline: true
+                  }
+                }
               ]
             }
           ],
           fixedFooter: {
-            primaryButton: { text: "Submit", onClick: { action: { actionMethodName: "handleSubmit" } } },
-            secondaryButton: { text: "Cancel", onClick: { action: { actionMethodName: "handleCancel" } } }
+            primaryButton: {
+              text: 'Submit',
+              onClick: { action: { actionMethodName: 'handleSubmit' } }
+            },
+            secondaryButton: {
+              text: 'Cancel',
+              onClick: { action: { actionMethodName: 'handleCancel' } }
+            }
           }
         }
       }
-    ],
-    text: "Opening the positive-response form..."
+    ]
   };
 
   return dialog;
 }
 
-// Main webhook handler
-app.post('/', (req, res) => {
-  try {
-    console.log('==== INCOMING EVENT ====', new Date().toISOString());
-    console.log('HEADERS:', JSON.stringify(req.headers));
-    // Avoid huge logs; stringify limited body preview
-    try { console.log('BODY (preview):', JSON.stringify(req.body).slice(0, 10000)); } catch(e) {}
+// returns a success confirmation card/text after a submit
+function buildSubmitResponse(summaryText) {
+  // Basic text response (works everywhere)
+  return textResponse(summaryText);
+}
 
-    const event = req.body || {};
-    const eventType = event.type || (event.commonEventObject ? 'MESSAGE' : '');
+// --------------------------- Helpers: extract text & inputs ----------------
+// Safely extract the raw incoming user text from multiple event shapes
+function extractIncomingText(event) {
+  // try common locations
+  if (!event) return '';
 
-    // ADDED_TO_SPACE
-    if (eventType === 'ADDED_TO_SPACE') {
-      return res.json(textResponse("🤖 Campaign Logger Bot added! Type /positive or say 'hi' to open the form."));
-    }
-
-    // MESSAGE
-    if (eventType === 'MESSAGE' || eventType === 'NORMAL_MESSAGE' || event.chat) {
-      const rawText = (event.message && (event.message.argumentText || event.message.text)) || (event.argumentText) || '';
-      const text = String(rawText).toLowerCase().trim();
-
-      if (text === '/positive' || text === '/pos' || text.includes('positive') || text === 'hi' || text === 'hello') {
-        return res.json(buildDialogResponse());
-      }
-
-      return res.json(textResponse("Got your message — type /positive or 'hi' to open the form."));
-    }
-
-    // CARD_CLICKED (form submit or button)
-    if (eventType === 'CARD_CLICKED') {
-      try {
-        console.log('CARD_CLICKED event:', JSON.stringify(event).slice(0, 8000));
-        const action = event.action || {};
-        const actionMethod = action.actionMethodName || (action.actionMethod && action.actionMethod.name) || '';
-
-        if (actionMethod === 'handleSubmit') {
-          const formData = {};
-          if (Array.isArray(action.parameters)) {
-            action.parameters.forEach(p => { if (p.key) formData[p.key] = p.value; });
-          }
-          if (event.common && event.common.formInputs) {
-            Object.keys(event.common.formInputs).forEach(k => {
-              const v = event.common.formInputs[k];
-              if (v && v.stringInputs && v.stringInputs.value) {
-                formData[k] = v.stringInputs.value[0] || '';
-              } else if (v && v.selectionInput && v.selectionInput.selectedValues) {
-                formData[k] = v.selectionInput.selectedValues.join(', ');
-              }
-            });
-          }
-
-          console.log('Form submission data:', formData);
-
-          const name = formData.prospectName || formData['prospectName'] || '-';
-          const email = formData.email || '-';
-          const responseText = formData.response || '-';
-
-          const confirmText = `✅ Positive Response Logged:\n• Name: ${name}\n• Email: ${email}\n• Response: ${responseText}`;
-          return res.json(textResponse(confirmText));
-        }
-
-        if (actionMethod === 'handleCancel') {
-          return res.json(textResponse('❌ Cancelled logging.'));
-        }
-
-        // Unknown action
-        console.log('Unknown CARD_CLICKED action:', actionMethod);
-        return res.json(textResponse('Action received.'));
-      } catch (err) {
-        console.error('Error handling CARD_CLICKED', err);
-        return res.json(textResponse('⚠️ Error processing action.'));
-      }
-    }
-
-    // Fallback
-    return res.json(textResponse('diagnostic: event received'));
-  } catch (err) {
-    console.error('Unhandled error in POST / handler', err);
-    // Return plain error so client doesn't keep spinning without a response
-    return res.status(500).json(textResponse('Server error processing request.'));
+  // If appCommandPayload (slash command / request dialog) contains message.text
+  if (event.chat && event.chat.appCommandPayload && event.chat.appCommandPayload.message) {
+    const m = event.chat.appCommandPayload.message;
+    if (m.argumentText) return m.argumentText;
+    if (m.text) return m.text;
   }
+
+  // event.message.* (regular message)
+  if (event.message) {
+    if (event.message.argumentText) return event.message.argumentText;
+    if (event.message.text) return event.message.text;
+  }
+
+  // direct top-level argumentText
+  if (event.argumentText) return event.argumentText;
+
+  return '';
+}
+
+// Extract form inputs after a dialog submit.
+// Supports a few shapes:
+// - event.action.parameters (array of {key, value})
+// - event.action.inputs (object mapping keys)
+// - event.inputs (object mapping keys) as seen in some dialog/submits
+function extractFormValues(event) {
+  const out = {};
+
+  // 1) event.action.parameters -> [{ key, value }]
+  if (event.action && Array.isArray(event.action.parameters)) {
+    event.action.parameters.forEach(p => {
+      if (p && p.key) out[p.key] = p.value || '';
+    });
+  }
+
+  // 2) event.action.inputs -> object mapping (some clients)
+  if (event.action && event.action.inputs && typeof event.action.inputs === 'object') {
+    Object.assign(out, event.action.inputs);
+  }
+
+  // 3) event.inputs -> object mapping (dialog submit sometimes)
+  if (event.inputs && typeof event.inputs === 'object') {
+    Object.assign(out, event.inputs);
+  }
+
+  // 4) event.message.formInputs (older shape)
+  if (event.message && event.message.formInputs) {
+    // formInputs might be { fieldName: [{ text: 'value' }] } or similar
+    Object.keys(event.message.formInputs).forEach(key => {
+      const v = event.message.formInputs[key];
+      if (Array.isArray(v) && v.length > 0 && typeof v[0].text === 'string') {
+        out[key] = v[0].text;
+      } else if (typeof v === 'string') {
+        out[key] = v;
+      } else if (v && typeof v === 'object' && v.value) {
+        out[key] = v.value;
+      }
+    });
+  }
+
+  return out;
+}
+
+// --------------------------- Main webhook ---------------------------
+app.post('/', (req, res) => {
+  const event = req.body || {};
+  console.log('==== INCOMING EVENT ====');
+  console.log(JSON.stringify(event, null, 2));
+
+  // sometimes Chat uses event.type or chat + appCommandPayload
+  const eventType = (event.type || '').toUpperCase(); // e.g. 'MESSAGE', 'CARD_CLICKED', 'ADDED_TO_SPACE'
+
+  // QUICK ROUTES:
+  // 1) If this is an action (button clicked / dialog submit) -> event.action or card click
+  if (event.action && event.action.actionMethodName) {
+    const method = event.action.actionMethodName;
+    console.log('Action methodName:', method);
+
+    if (method === 'handleSubmit') {
+      // parse submitted inputs
+      const values = extractFormValues(event);
+      const name = values.prospectName || values.prospectname || values['Prospect Name'] || '';
+      const email = values.email || '';
+      const responseText = values.response || values.Response || '';
+
+      const summary = `✅ Positive Response Logged:\n• Name: ${name}\n• Email: ${email}\n• Response: ${responseText}`;
+      console.log('Submit values:', { name, email, responseText });
+
+      // Respond to Chat with a confirmation message
+      return res.json(buildSubmitResponse(summary));
+    }
+
+    if (method === 'handleCancel') {
+      return res.json(textResponse('Cancelled.'));
+    }
+
+    // unknown action -> just ack
+    return res.json(textResponse(`Action received: ${method}`));
+  }
+
+  // 2) Card clicked events sometimes come as type === 'CARD_CLICKED'
+  if (eventType === 'CARD_CLICKED') {
+    // card click can also contain event.action -> handled above
+    return res.json(textResponse('Card clicked.'));
+  }
+
+  // 3) Dialog REQUEST event or slash command:
+  // We'll check for appCommandPayload.isDialogEvent OR slash command metadata.
+  const isDialogEvent =
+    !!(event.chat && event.chat.appCommandPayload && event.chat.appCommandPayload.isDialogEvent) ||
+    !!event.isDialogEvent ||
+    (eventType === 'REQUEST_DIALOG') ||
+    false;
+
+  // Extract a safe text representation - handles regular message + appCommandPayload shapes
+  const incomingText = extractIncomingText(event);
+  const text = String(incomingText || '').toLowerCase().trim();
+
+  // If it's a dialog request (Google sends this when your slash command triggers a dialog),
+  // return the dialog JSON immediately.
+  if (isDialogEvent || text === '/positive' || text === '/pos' || text === 'hi' || text.includes('/pos')) {
+    console.log('→ Returning dialog JSON for:', { text, isDialogEvent });
+    return res.json(buildDialogResponse());
+  }
+
+  // 4) Normal message fallback
+  // You should respond quickly with a small text. Avoid long processing.
+  console.log('→ Fallback text response');
+  return res.json(textResponse("Got your message – type /positive or 'hi' to open the form."));
+});
+
+// Health check root GET so a browser visit doesn't show "Cannot GET /"
+app.get('/', (req, res) => {
+  res.send('OK - Google Chat bot endpoint is running.');
 });
 
 // Start server
-const port = process.env.PORT || 8080;
-app.listen(port, () => console.log(`Server listening on port ${port}`));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
