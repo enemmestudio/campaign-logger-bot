@@ -1,0 +1,15 @@
+{
+  "chat": {
+    "messagePayload": {
+      "message": {
+        "text": "hi",
+        "argumentText": "hi"
+      }
+    }
+  },
+  "commonEventObject": {
+    "userLocale": "en",
+    "hostApp": "CHAT",
+    "platform": "WEB"
+  }
+}

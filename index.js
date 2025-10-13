@@ -13,36 +13,61 @@ app.use(express.json({ limit: '1mb' }));
 function buildDialogResponse() {
   return {
     actionResponse: {
-      type: 'DIALOG',
+      type: "DIALOG",
       dialogAction: {
         dialog: {
-          title: 'Log Positive Response',
           body: {
             sections: [
               {
+                header: "Log Positive Response",
                 widgets: [
-                  { textInput: { label: 'Prospect Name', name: 'prospectName' } },
-                  { textInput: { label: 'Email', name: 'email' } },
-                  { textInput: { label: 'Response (copy/paste)', name: 'response', multiline: true } }
-                ]
-              }
-            ],
-            fixedFooter: {
-              primaryButton: {
-                text: 'Submit',
-                onClick: { action: { actionMethodName: 'handleSubmit' } }
+                  {
+                    textInput: {
+                      label: "Prospect Name",
+                      name: "prospectName",
+                    },
+                  },
+                  {
+                    textInput: {
+                      label: "Email",
+                      name: "email",
+                    },
+                  },
+                  {
+                    textInput: {
+                      label: "Response (copy/paste)",
+                      name: "response",
+                      multiline: true,
+                    },
+                  },
+                ],
               },
-              secondaryButton: {
-                text: 'Cancel',
-                onClick: { action: { actionMethodName: 'handleCancel' } }
-              }
-            }
-          }
-        }
-      }
-    }
+            ],
+          },
+          fixedFooter: {
+            primaryButton: {
+              text: "Submit",
+              onClick: {
+                action: {
+                  actionMethodName: "handleSubmit",
+                },
+              },
+            },
+            secondaryButton: {
+              text: "Cancel",
+              onClick: {
+                action: {
+                  actionMethodName: "handleCancel",
+                },
+              },
+            },
+          },
+        },
+      },
+    },
   };
 }
+
 
 /**
  * Simple text response helper
