@@ -2,7 +2,7 @@
 const express = require('express');
 const app = express();
 
-app.use(express.json()); // parse JSON bodies
+app.use(express.json({ limit: '1mb' })); // parse JSON bodies
 
 // --- helper to build the dialog card response ---
 function buildDialogResponse() {
@@ -25,7 +25,6 @@ function buildDialogResponse() {
             fixedFooter: {
               primaryButton: {
                 text: "Submit",
-                // This instructs Chat to send a CARD_CLICKED event with an action
                 onClick: { action: { actionMethodName: "handleSubmit" } }
               },
               secondaryButton: {
@@ -40,24 +39,60 @@ function buildDialogResponse() {
   };
 }
 
-// --- helper to build a plain message response ---
 function textResponse(text) {
   return { text: text };
 }
 
+// Helper: normalize incoming event so we can use unified logic
+function normalizeEvent(raw) {
+  // If the event already has a top-level "type", keep it
+  const out = Object.assign({}, raw);
+
+  if (!out.type) {
+    // Older/newer Chat Add-on format — detect message payload from your logs:
+    // - v2 shape has .chat.message or .chat.messagePayload
+    if (raw.chat && (raw.chat.message || raw.chat.messagePayload)) {
+      out.type = 'MESSAGE';
+      // copy message into a familiar place used by existing code
+      out.message = raw.chat.message || raw.chat.messagePayload.message || null;
+      // For slash/argumentText support:
+      if (raw.chat.message && raw.chat.message.argumentText) {
+        out.message.argumentText = raw.chat.message.argumentText;
+      } else if (raw.chat.messagePayload && raw.chat.messagePayload.message) {
+        out.message.argumentText = raw.chat.messagePayload.message.argumentText || '';
+      }
+      // carry over common.formInputs if present
+      out.common = raw.commonEventObject || raw.common || {};
+      // carry action if present (CARD_CLICKED sometimes delivered differently)
+      if (raw.action) out.action = raw.action;
+    } else if (raw.message) {
+      // already present
+      out.type = raw.type || 'MESSAGE';
+    } else if (raw.authorizationEventObject && raw.configCompleteRedirectUri) {
+      // installation / config complete flow — treat as ADDED_TO_SPACE
+      out.type = 'ADDED_TO_SPACE';
+    } else if (raw.action) {
+      out.type = 'CARD_CLICKED';
+    }
+  }
+
+  return out;
+}
+
 // --- main webhook handler ---
 app.post('/', (req, res) => {
-  // Debug logging (safe for initial debugging)
+  const raw = req.body || {};
+  const event = normalizeEvent(raw);
+
   try {
-    console.log('==== INCOMING EVENT ====', new Date().toISOString());
+    console.log('==== INCOMING EVENT ==== ', new Date().toISOString());
     console.log('HEADERS:', JSON.stringify(req.headers));
-    // Limit body size in logs to avoid huge prints
-    console.log('BODY:', JSON.stringify(req.body).slice(0, 8000));
+    // log the most relevant chunk of the body (avoid huge logs)
+    console.log('BODY (truncated):', JSON.stringify(req.body).slice(0, 8000));
   } catch (e) {
     console.error('Error logging request', e);
   }
 
-  const event = req.body || {};
   const eventType = event.type;
 
   // When the bot is added to a space
@@ -67,13 +102,15 @@ app.post('/', (req, res) => {
 
   // When the bot receives a normal message
   if (eventType === 'MESSAGE') {
-    // Google Chat sometimes uses message.argumentText for slash-style commands
+    // Support both shapes:
+    // - event.message.argumentText (slash commands)
+    // - event.message.text
+    // - event.chat.message (we copied that earlier in normalizeEvent)
     const rawText = (event.message && (event.message.argumentText || event.message.text)) || '';
     const text = String(rawText).toLowerCase().trim();
 
     // triggers to open the dialog
     if (text === '/positive' || text.includes('positive') || text === 'hi' || text === 'hello') {
-      // return the dialog action which will open the form in the client
       return res.json(buildDialogResponse());
     }
 
@@ -82,29 +119,22 @@ app.post('/', (req, res) => {
   }
 
   // When user clicks a card button or submits a dialog
-  // Chat sends CARD_CLICKED and the submitted form is in event.action
   if (eventType === 'CARD_CLICKED') {
     try {
-      // event.action carries action details (parameters etc.)
       const action = event.action || {};
+      // Action name might be in different places
       const actionMethod = action.actionMethodName || (action.actionMethod && action.actionMethod.name) || '';
 
-      // If user clicked Submit (we named the actionMethodName "handleSubmit")
       if (actionMethod === 'handleSubmit') {
-        // Form data may be in action.parameters (array of {key, value}) or in event.common.formInputs for Apps Script style.
-        // Google Chat native cards often provide action.parameters
         let formData = {};
 
         if (Array.isArray(action.parameters)) {
           action.parameters.forEach(p => {
-            // p has { key, value }
             if (p.key) formData[p.key] = p.value;
           });
         }
 
-        // Some clients may present form inputs differently; try safe extraction:
         if (event.common && event.common.formInputs) {
-          // Apps Script style formInputs: each key -> stringInputs.value array
           try {
             Object.keys(event.common.formInputs).forEach(k => {
               const v = event.common.formInputs[k];
@@ -112,15 +142,10 @@ app.post('/', (req, res) => {
                 formData[k] = v.stringInputs.value[0] || '';
               }
             });
-          } catch (e) {
-            // ignore if shape differs
-          }
+          } catch (e) { /* ignore */ }
         }
 
         console.log('Form submission data:', formData);
-
-        // TODO: Here you could write `formData` to a Google Sheet using Google APIs (requires OAuth).
-        // For now return a friendly confirmation message back to the chat.
 
         const name = formData.prospectName || formData['prospectName'] || '-';
         const email = formData.email || '-';
@@ -131,12 +156,10 @@ app.post('/', (req, res) => {
         return res.json(textResponse(confirmText));
       }
 
-      // handle Cancel click
       if (actionMethod === 'handleCancel') {
         return res.json(textResponse('❌ Cancelled logging.'));
       }
 
-      // Unknown CARD_CLICKED action
       console.log('CARD_CLICKED unknown action:', actionMethod);
       return res.json(textResponse('Action received.'));
     } catch (err) {
@@ -145,7 +168,7 @@ app.post('/', (req, res) => {
     }
   }
 
-  // default fallback for any event types we didn't explicitly handle
+  // default fallback for anything else
   return res.json(textResponse('diagnostic: event received'));
 });
 
