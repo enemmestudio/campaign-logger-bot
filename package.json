@@ -1,14 +1,15 @@
 {
   "name": "campaign-logger-bot",
   "version": "1.0.0",
+  "description": "Google Chat webhook for Campaign Logger (dialog + submit)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
-  "engines": {
-    "node": "18.x"
-  },
+  "author": "you",
+  "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "morgan": "^1.10.0"
   }
 }
