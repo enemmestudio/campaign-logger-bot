@@ -1,0 +1,15 @@
+{
+  "action": {
+    "actionMethodName": "handleSubmit",
+    "parameters": [
+      { "key": "prospectName", "value": "Jane Doe" },
+      { "key": "email", "value": "jane@example.com" },
+      { "key": "response", "value": "Interested — follow up please" }
+    ]
+  },
+  "commonEventObject": {
+    "userLocale": "en",
+    "hostApp": "CHAT",
+    "platform": "WEB"
+  }
+}
