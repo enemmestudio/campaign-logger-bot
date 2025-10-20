@@ -1,6 +1,5 @@
 // index.js
-// Simple Google Chat bot webhook that replies in the same thread
-// Node 16+ recommended
+// Google Chat webhook that always replies into the same thread (if available)
 
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -12,7 +11,7 @@ const app = express();
 app.use(morgan('dev'));
 app.use(bodyParser.json());
 
-// --- Helpers that attach thread if available ---
+// Helper that logs and attaches thread if provided
 function makeTextPayload(text, threadName) {
   const payload = { text };
   if (threadName) payload.thread = { name: threadName };
@@ -21,32 +20,20 @@ function makeTextPayload(text, threadName) {
 }
 
 function buildDialogPayload(threadName) {
-  const payload = {
+  const dialog = {
     actionResponse: {
       type: "DIALOG",
       dialogAction: {
         dialog: {
           title: "Log Positive Response",
-          body: {
-            sections: [
-              {
-                widgets: [
-                  { textInput: { label: "Prospect Name", name: "prospectName" } },
-                  { textInput: { label: "Email", name: "email" } },
-                  { textInput: { label: "Response (copy/paste)", name: "response", multiline: true } }
-                ]
-              }
-            ]
-          },
+          body: { sections: [ { widgets: [
+            { textInput: { label: "Prospect Name", name: "prospectName" } },
+            { textInput: { label: "Email", name: "email" } },
+            { textInput: { label: "Response (copy/paste)", name: "response", multiline: true } }
+          ] } ] },
           fixedFooter: {
-            primaryButton: {
-              text: "Submit",
-              onClick: { action: { actionMethodName: "handleSubmit" } }
-            },
-            secondaryButton: {
-              text: "Cancel",
-              onClick: { action: { actionMethodName: "handleCancel" } }
-            }
+            primaryButton: { text: "Submit", onClick: { action: { actionMethodName: "handleSubmit" } } },
+            secondaryButton: { text: "Cancel", onClick: { action: { actionMethodName: "handleCancel" } } }
           }
         }
       }
@@ -56,40 +43,29 @@ function buildDialogPayload(threadName) {
         cardId: "dlg-fallback",
         card: {
           header: { title: "Log Positive Response" },
-          sections: [
-            {
-              widgets: [
-                { textInput: { label: "Prospect Name", name: "prospectName" } },
-                { textInput: { label: "Email", name: "email" } },
-                { textInput: { label: "Response (copy/paste)", name: "response", multiline: true } }
-              ]
-            }
-          ],
+          sections: [ { widgets: [
+            { textInput: { label: "Prospect Name", name: "prospectName" } },
+            { textInput: { label: "Email", name: "email" } },
+            { textInput: { label: "Response (copy/paste)", name: "response", multiline: true } }
+          ] } ],
           fixedFooter: {
-            primaryButton: {
-              text: "Submit",
-              onClick: { action: { actionMethodName: "handleSubmit" } }
-            },
-            secondaryButton: {
-              text: "Cancel",
-              onClick: { action: { actionMethodName: "handleCancel" } }
-            }
+            primaryButton: { text: "Submit", onClick: { action: { actionMethodName: "handleSubmit" } } },
+            secondaryButton: { text: "Cancel", onClick: { action: { actionMethodName: "handleCancel" } } }
           }
         }
       }
     ]
   };
 
-  if (threadName) payload.thread = { name: threadName };
-  console.log('=> Outgoing dialog payload:', JSON.stringify(payload, null, 2));
-  return payload;
+  if (threadName) dialog.thread = { name: threadName };
+  console.log('=> Outgoing dialog payload:', JSON.stringify(dialog, null, 2));
+  return dialog;
 }
 
 function handleActionSubmit(event, threadName) {
-  // Support multiple event shapes for form inputs
-  const rawInputs = event?.action?.parameters || event?.formInputs || event?.commonEventObject?.formInputs || {};
+  const raw = event?.action?.parameters || event?.formInputs || {};
   const getVal = (k) => {
-    const v = rawInputs[k];
+    const v = raw[k];
     if (v == null) return '';
     if (typeof v === 'object' && 'value' in v) return v.value;
     if (Array.isArray(v) && v.length) {
@@ -98,67 +74,48 @@ function handleActionSubmit(event, threadName) {
     }
     return v;
   };
-
-  const name = getVal('prospectName') || getVal('prospect') || '';
+  const name = getVal('prospectName') || '';
   const email = getVal('email') || '';
   const responseText = getVal('response') || '';
-
   const text = `✅ Positive Response Logged:\n• Name: ${name}\n• Email: ${email}\n• Response: ${responseText}`;
-  const payload = {
-    actionResponse: { type: "UPDATE_MESSAGE" },
-    text
-  };
+  const payload = { actionResponse: { type: "UPDATE_MESSAGE" }, text };
   if (threadName) payload.thread = { name: threadName };
   console.log('=> Outgoing submit payload:', JSON.stringify(payload, null, 2));
   return payload;
 }
 
-// --- Main webhook handler ---
 app.post('/', (req, res) => {
   const event = req.body || {};
-  console.log('==== INCOMING EVENT ====');
-  console.log(JSON.stringify(event, null, 2));
+  console.log('==== INCOMING EVENT ===='); console.log(JSON.stringify(event, null, 2));
 
-  // normalize the message and thread
+  // Normalize extraction of message & thread
   const message = event.chat?.message || event.message || event?.chat?.message || {};
   const threadName = message?.thread?.name || event?.thread?.name || null;
-
   const rawText = message?.argumentText || message?.text || event?.argumentText || '';
-  const text = String(rawText || '').toLowerCase().trim();
+  const text = String(rawText).toLowerCase().trim();
 
-  // Action submissions (dialog submit / cancel)
+  // Action handlers (dialog submit/cancel)
   if (event?.action?.actionMethodName) {
     const method = event.action.actionMethodName;
     console.log('Action method:', method);
-    if (method === 'handleSubmit') {
-      const resp = handleActionSubmit(event, threadName);
-      return res.status(200).json(resp);
-    }
-    if (method === 'handleCancel') {
-      return res.status(200).json(makeTextPayload('Cancelled.', threadName));
-    }
+    if (method === 'handleSubmit') return res.status(200).json(handleActionSubmit(event, threadName));
+    if (method === 'handleCancel') return res.status(200).json(makeTextPayload('Cancelled.', threadName));
   }
 
-  // If this is a dialog request from a slash command or app action
-  const isDialogRequest = event.chat?.appCommandPayload?.isDialogEvent ||
-                          (typeof event.type === 'string' && /DIALOG|APP_ACTION/i.test(event.type));
+  // Detect dialog requests
+  const isDialog = event.chat?.appCommandPayload?.isDialogEvent || (typeof event.type === 'string' && /DIALOG|APP_ACTION/i.test(event.type));
+  if (isDialog) return res.status(200).json(buildDialogPayload(threadName));
 
-  if (isDialogRequest) {
-    return res.status(200).json(buildDialogPayload(threadName));
-  }
-
-  // Recognize slash commands or friendly triggers
+  // Slash commands or friendly triggers
   if (text === '/pos' || text === '/positive' || text.includes('positive') || text === 'hi') {
     return res.status(200).json(buildDialogPayload(threadName));
   }
 
-  // fallback response — include thread so reply appears in DM/thread
+  // Default reply - ALWAYS attach thread if available
   return res.status(200).json(makeTextPayload("Got your message – type /positive or 'hi' to open the form.", threadName));
 });
 
-// Healthcheck / root
+// Optional health-check
 app.get('/', (req, res) => res.send('Campaign Logger Bot is running.'));
 
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
