@@ -1,4 +1,6 @@
-// index.js
+// index.js (patched)
+// Minimal changes: normalize event shape, attach thread when available, log outgoing payloads.
+
 const express = require('express');
 const bodyParser = require('body-parser');
 const morgan = require('morgan');
@@ -14,16 +16,16 @@ app.get('/', (req, res) => {
   res.send('Campaign Logger Bot is running.');
 });
 
-function textResponse(text) {
-  return {
-    "text": text
-  };
+function textResponse(text, threadName) {
+  const payload = { text };
+  if (threadName) payload.thread = { name: threadName };
+  console.log('=> Outgoing payload:', JSON.stringify(payload, null, 2));
+  return payload;
 }
 
 // Build the dialog JSON that Chat expects (REQUEST_DIALOG response)
-function buildDialogResponse() {
-  // This is the dialog definition returned inline to open a dialog form.
-  return {
+function buildDialogResponse(threadName) {
+  const dialog = {
     actionResponse: {
       type: "DIALOG",
       dialogAction: {
@@ -61,8 +63,7 @@ function buildDialogResponse() {
         }
       }
     },
-
-    // Also include a cardsV2 fallback (Chat web client sometimes expects it).
+    // fallback card
     cardsV2: [
       {
         cardId: "dlg-fallback",
@@ -91,15 +92,16 @@ function buildDialogResponse() {
       }
     ]
   };
+
+  // When returning a dialog inline, including thread is safe/harmless.
+  if (threadName) dialog.thread = { name: threadName };
+  console.log('=> Outgoing dialog payload:', JSON.stringify(dialog, null, 2));
+  return dialog;
 }
 
 // Handle form action submissions (user clicked Submit in the dialog)
-function handleActionSubmit(event) {
-  // Google Chat sends the form inputs under event.commonEventObject? or event.action? 
-  // We'll try common locations used by Chat:
-  const inputs = (event && (event.action && event.action.parameters)) || event.formInputs || {};
-  // Some payloads send form inputs as { prospectName: { value: '...' } }
-  // Normalize them:
+function handleActionSubmit(event, threadName) {
+  const inputs = (event && (event.action && event.action.parameters)) || event.formInputs || event.commonEventObject?.formInputs || {};
   const getVal = (k) => {
     if (!inputs) return '';
     if (inputs[k] && typeof inputs[k] === 'object' && 'value' in inputs[k]) return inputs[k].value;
@@ -113,68 +115,66 @@ function handleActionSubmit(event) {
 
   console.log('Dialog submit received:', { name, email, responseText });
 
-  // Here you would persist to DB, send email, etc.
-  // Return a text message and close dialog (cardsV2 with text is fine).
-  return {
-    actionResponse: {
-      type: "UPDATE_MESSAGE"
-    },
+  // Return update message + close dialog
+  const payload = {
+    actionResponse: { type: "UPDATE_MESSAGE" },
     text: `✅ Positive Response Logged:\n• Name: ${name}\n• Email: ${email}\n• Response: ${responseText}`
   };
+  if (threadName) payload.thread = { name: threadName };
+  console.log('=> Outgoing submit payload:', JSON.stringify(payload, null, 2));
+  return payload;
 }
 
-// Generic event handler
 app.post('/', (req, res) => {
   const event = req.body || {};
   console.log('==== INCOMING EVENT ====');
   console.log(JSON.stringify(event, null, 2));
 
-  // NOTE: In production verify the systemIdToken JWT in event.authorizationEventObject.systemIdToken
-  // to ensure requests actually come from Google Chat. (Omitted here for brevity.)
+  // normalize main fields
+  const chat = event.chat || event;
+  const message = (chat && chat.message) || event.message || {};
+  const threadName = message?.thread?.name || event?.thread?.name || event?.chat?.message?.thread?.name || null;
 
-  // Determine type / extract text safely:
-  const eventType =
-    event.type ||
-    (event.commonEventObject && event.commonEventObject.type) ||
-    (event.chat && (event.chat.appCommandPayload ? 'REQUEST_DIALOG' : 'MESSAGE')) ||
-    'UNKNOWN';
-
-  // If this is a dialog action (user clicked Submit), handle it:
-  // Google may send event.action with actionMethodName
-  if (event.action && event.action.actionMethodName) {
-    const methodName = event.action.actionMethodName;
-    console.log('Action method:', methodName);
-    if (methodName === 'handleSubmit') {
-      const resp = handleActionSubmit(event);
-      return res.json(resp);
-    } else if (methodName === 'handleCancel') {
-      return res.json({ text: 'Cancelled.' });
-    }
-  }
-
-  // If it is an appCommand dialog request (slash command that triggers dialog):
-  if (event.chat && event.chat.appCommandPayload && event.chat.appCommandPayload.isDialogEvent) {
-    console.log('→ Dialog request from appCommandPayload');
-    return res.json(buildDialogResponse());
-  }
-
-  // Extract message text for normal messages:
+  // determine text (safe extraction)
   const rawText =
-    (event.message && (event.message.argumentText || event.message.text)) ||
-    (event.argumentText) ||
-    (event.chat && event.chat.message && (event.chat.message.text || event.chat.message.argumentText)) ||
+    message?.argumentText ||
+    message?.text ||
+    event?.argumentText ||
+    event?.chat?.message?.text ||
+    event?.text ||
     '';
 
   const text = String(rawText || '').toLowerCase().trim();
 
-  // If slash command /pos or /positive or user typed 'hi' → open dialog
-  if (text === '/pos' || text === '/positive' || text.includes('positive') || text === 'hi') {
-    console.log('→ Returning dialog JSON for text:', text);
-    return res.json(buildDialogResponse());
+  // ACTION handler (dialog submit/cancel)
+  if (event.action && event.action.actionMethodName) {
+    const methodName = event.action.actionMethodName;
+    console.log('Action method:', methodName);
+    if (methodName === 'handleSubmit') {
+      const resp = handleActionSubmit(event, threadName);
+      return res.status(200).json(resp);
+    } else if (methodName === 'handleCancel') {
+      return res.status(200).json(textResponse('Cancelled.', threadName));
+    }
   }
 
-  // Otherwise fallback text
-  return res.json(textResponse("Got your message – type /positive or 'hi' to open the form."));
+  // If this is an appCommand dialog request (slash command that triggers dialog)
+  // Some events include chat.appCommandPayload, others include event.type === 'APP_ACTION' etc.
+  if ((event.chat && event.chat.appCommandPayload && event.chat.appCommandPayload.isDialogEvent) ||
+      (event.type && event.type.toString().toUpperCase().includes('DIALOG')) ||
+      (event.type && event.type.toString().toUpperCase().includes('APP') && event.action && event.action.actionMethodName === 'REQUEST_DIALOG')) {
+    console.log('→ Dialog request detected; returning dialog JSON; thread:', threadName);
+    return res.status(200).json(buildDialogResponse(threadName));
+  }
+
+  // Recognize slash commands or friendly triggers
+  if (text === '/pos' || text === '/positive' || text.includes('positive') || text === 'hi') {
+    console.log('→ Returning dialog JSON for text:', text);
+    return res.status(200).json(buildDialogResponse(threadName));
+  }
+
+  // Fallback reply
+  return res.status(200).json(textResponse("Got your message – type /positive or 'hi' to open the form.", threadName));
 });
 
 app.listen(PORT, () => {
